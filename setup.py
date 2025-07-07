@@ -28,7 +28,7 @@ setup(
     ],
     keywords='image processing',
     packages=find_packages(exclude=['others', '*.others', 'others.*', '*.others.*']),
-    install_requires=['numpy'],
+    install_requires=['numpy', 'torch'],
     python_requires='>=3.10',
     include_package_data=True,
     ext_modules=[
