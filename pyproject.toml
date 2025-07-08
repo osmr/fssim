@@ -1,3 +1,41 @@
 [build-system]
-requires = ["setuptools", "wheel", "torch"]
+requires = ["setuptools>=61.0", "wheel", "torch>=1.8"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "fssim"
+dynamic = ["version"]
+description = "Fused SSIM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Oleg Sémery", email = "osemery@gmail.com" },
+]
+urls = { Homepage = "https://github.com/osmr/fssim" }
+keywords = ["image processing"]
+classifiers = [
+    'Development Status :: 3 - Alpha',
+    'Intended Audience :: Science/Research',
+    'License :: OSI Approved :: MIT License',
+    'Operating System :: OS Independent',
+    'Programming Language :: Python :: 3',
+    'Topic :: Scientific/Engineering :: Image Processing',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+]
+dependencies = [
+    "numpy",
+    "torch",
+]
+
+[tool.wheel]
+universal = true
+
+[tool.setuptools.dynamic]
+version = {attr = "fssim.__version__"}
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+exclude = ["others", "*.others", "others.*", "*.others.*"]

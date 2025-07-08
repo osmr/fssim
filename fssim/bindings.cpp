@@ -3,8 +3,6 @@
 torch::Tensor multiply_by_two_cuda(torch::Tensor input);
 
 torch::Tensor multiply_by_two(torch::Tensor input) {
-    TORCH_CHECK(input.device().is_cuda(), "Tensor must be on CUDA device");
-    TORCH_CHECK(input.dtype() == torch::kFloat32, "Only float32 is supported");
     return multiply_by_two_cuda(input);
 }
 
