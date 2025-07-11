@@ -17,7 +17,11 @@ pip install git+https://github.com/osmr/fused_ssim
 or
 ```bash
 git clone git@github.com:osmr/fused_ssim.git
-pip install ./fused_ssim/
+cd fused_ssim
+# Local compilation case:
+pip install .
+# Multi-architecture distribution case:
+CUDA_VISIBLE_DEVICES="" python -m build
 ```
 
 ## Usage
