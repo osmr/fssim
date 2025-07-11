@@ -24,6 +24,7 @@ extern __constant__ float gauss_coefs[11];
 // ------------------------------------------
 // Utility: Safe pixel fetch w/ zero padding
 // ------------------------------------------
-__device__ __forceinline__ float get_pix_value(const float* img, int b, int c, int y, int x, int CH, int H, int W);
+__device__ __forceinline__ float get_pix_value(const float* img, const int b, const int c, const int y, const int x,
+                                               const int CH, const int H, const int W);
 
 #endif  // COMMON_CUH
