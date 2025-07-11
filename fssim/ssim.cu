@@ -7,12 +7,14 @@
 
 namespace cg = cooperative_groups;
 
-// ------------------------------------------------------------------------------------
-// Forward Kernel: Fused SSIM
-//  - Two-pass convolution to get mu1, mu2, sigma1_sq, sigma2_sq, sigma12, etc.
-//  - Writes final SSIM map to ssim_map
-//  - Optionally writes partial derivatives to dm_dmu1, dm_dsigma1_sq, dm_dsigma12
-// ------------------------------------------------------------------------------------
+/**
+ * @brief Forward Kernel: Fused SSIM.
+ *
+ * Fused SSIM Map Calculation (CUDA Kernel)
+ *  - Two-pass convolution to get mu1, mu2, sigma1_sq, sigma2_sq, sigma12, etc.
+ *  - Writes final SSIM map to ssim_map
+ *  - Optionally writes partial derivatives to dm_dmu1, dm_dsigma1_sq, dm_dsigma12
+ */
 __global__ void ssim_kernel(const int H,
                             const int W,
                             const int CH,
@@ -229,11 +231,13 @@ __global__ void ssim_kernel(const int H,
     }
 }
 
-// ------------------------------------------------------------------------------------
-// PyTorch Interface (Forward)
-//   Returns (ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12).
-//   If train=false, derivative Tensors are empty.
-// ------------------------------------------------------------------------------------
+/**
+ * @brief PyTorch Interface (Forward).
+ *
+ * PyTorch Interface for SSIM Map calculation (Forward pass)
+ *   Returns (ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12).
+ *   If train=false, derivative Tensors are empty.
+ */
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda(float C1,
                                                                                  float C2,
                                                                                  const torch::Tensor& img1,

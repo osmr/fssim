@@ -7,10 +7,12 @@
 
 namespace cg = cooperative_groups;
 
-// ------------------------------------------------------------------------------------
-// Backward Kernel: Apply chain rule to get dL/d(img1) from partial derivatives
-//    (dm_dmu1, dm_dsigma1_sq, dm_dsigma12) and dL/dmap (the gradient from above).
-// ------------------------------------------------------------------------------------
+/**
+ * @brief Backward Kernel: Fused SSIM.
+ *
+ * Backward pass for fused SSIM Map Calculation (CUDA Kernel): Apply chain rule to get dL/d(img1) from partial
+ *    derivatives (dm_dmu1, dm_dsigma1_sq, dm_dsigma12) and dL/dmap (the gradient from above).
+ */
 __global__ void ssim_backward_kernel(const int H,
                                      const int W,
                                      const int CH,
@@ -151,12 +153,14 @@ __global__ void ssim_backward_kernel(const int H,
     }
 }
 
-// ------------------------------------------------------------------------------------
-// PyTorch Interface (Backward)
-//   Takes the gradient wrt the SSIM map and
-//   the partial derivatives from forward;
-//   returns dL/d(img1).
-// ------------------------------------------------------------------------------------
+/**
+ * @brief PyTorch Interface (Backward).
+ *
+ * PyTorch Interface for SSIM Map calculation (Backward pass)
+ *   Takes the gradient wrt the SSIM map and
+ *   the partial derivatives from forward;
+ *   returns dL/d(img1).
+ */
 torch::Tensor ssim_backward_cuda(const float C1,
                                  const float C2,
                                  const torch::Tensor& img1,
