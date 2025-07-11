@@ -5,7 +5,7 @@
 // ------------------------------------------
 // Constant Memory for Gaussian Coefficients
 // ------------------------------------------
-extern __constant__ float cGauss[11];
+extern __constant__ float gauss_coefs[11];
 
 // ------------------------------------------
 // Block and Shared Memory Dimensions

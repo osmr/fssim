@@ -13,20 +13,18 @@ namespace cg = cooperative_groups;
 //    (dm_dmu1, dm_dsigma1_sq, dm_dsigma12)
 //    and dL/dmap (the gradient from above).
 // ------------------------------------------
-__global__ void fusedssim_backwardCUDA(
-    int H,
-    int W,
-    int CH,
-    float C1,
-    float C2,
-    const float* __restrict__ img1,
-    const float* __restrict__ img2,
-    const float* __restrict__ dL_dmap,
-    float* __restrict__ dL_dimg1,
-    const float* __restrict__ dm_dmu1,
-    const float* __restrict__ dm_dsigma1_sq,
-    const float* __restrict__ dm_dsigma12
-) {
+__global__ void ssim_backward_kernel(int H,
+                                     int W,
+                                     int CH,
+                                     float C1,
+                                     float C2,
+                                     const float* __restrict__ img1,
+                                     const float* __restrict__ img2,
+                                     const float* __restrict__ dL_dmap,
+                                     float* __restrict__ dL_dimg1,
+                                     const float* __restrict__ dm_dmu1,
+                                     const float* __restrict__ dm_dsigma1_sq,
+                                     const float* __restrict__ dm_dsigma12) {
     auto block = cg::this_thread_block();
 
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
@@ -88,7 +86,7 @@ __global__ void fusedssim_backwardCUDA(
 
                     #pragma unroll
                     for (int d = 1; d <= HALO; ++d) {
-                        float w = cGauss[HALO - d];
+                        float w = gauss_coefs[HALO - d];
                         float left0  = sData[0][yy][lx - d];
                         float left1  = sData[1][yy][lx - d];
                         float left2  = sData[2][yy][lx - d];
@@ -103,7 +101,7 @@ __global__ void fusedssim_backwardCUDA(
                     }
                     // center
                     {
-                        float wc = cGauss[HALO];
+                        float wc = gauss_coefs[HALO];
                         float c0 = sData[0][yy][lx];
                         float c1 = sData[1][yy][lx];
                         float c2 = sData[2][yy][lx];
@@ -129,7 +127,7 @@ __global__ void fusedssim_backwardCUDA(
 
 #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
-                float w = cGauss[HALO - d];
+                float w = gauss_coefs[HALO - d];
                 float* top = sScratch[ly - d][lx];
                 float* bot = sScratch[ly + d][lx];
 
@@ -139,7 +137,7 @@ __global__ void fusedssim_backwardCUDA(
             }
             // center
             {
-                float wc = cGauss[HALO];
+                float wc = gauss_coefs[HALO];
                 float* ctr = sScratch[ly][lx];
                 sum0 += ctr[0] * wc;
                 sum1 += ctr[1] * wc;
@@ -162,17 +160,14 @@ __global__ void fusedssim_backwardCUDA(
 //   the partial derivatives from forward;
 //   returns dL/d(img1).
 // ------------------------------------------
-torch::Tensor
-fusedssim_backward(
-    float C1,
-    float C2,
-    torch::Tensor &img1,
-    torch::Tensor &img2,
-    torch::Tensor &dL_dmap,
-    torch::Tensor &dm_dmu1,
-    torch::Tensor &dm_dsigma1_sq,
-    torch::Tensor &dm_dsigma12
-) {
+torch::Tensor ssim_backward_cuda(float C1,
+                                 float C2,
+                                 torch::Tensor &img1,
+                                 torch::Tensor &img2,
+                                 torch::Tensor &dL_dmap,
+                                 torch::Tensor &dm_dmu1,
+                                 torch::Tensor &dm_dsigma1_sq,
+                                 torch::Tensor &dm_dsigma12) {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
     int B  = img1.size(0);
     int CH = img1.size(1);
@@ -186,7 +181,7 @@ fusedssim_backward(
               B);
     dim3 block(BLOCK_X, BLOCK_Y);
 
-    fusedssim_backwardCUDA<<<grid, block>>>(
+    ssim_backward_kernel<<<grid, block>>>(
         H, W, CH, C1, C2,
         img1.contiguous().data_ptr<float>(),
         img2.contiguous().data_ptr<float>(),

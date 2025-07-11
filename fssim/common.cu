@@ -1,6 +1,6 @@
 #include "common.cuh"
 
-__constant__ float cGauss[11] = {
+__constant__ float gauss_coefs[11] = {
     0.001028380123898387f,
     0.0075987582094967365f,
     0.036000773310661316f,

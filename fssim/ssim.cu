@@ -15,19 +15,17 @@ namespace cg = cooperative_groups;
 //  - Optionally writes partial derivatives
 //    to dm_dmu1, dm_dsigma1_sq, dm_dsigma12
 // ------------------------------------------
-__global__ void fusedssimCUDA(
-    int H,
-    int W,
-    int CH,
-    float C1,
-    float C2,
-    const float* __restrict__ img1,
-    const float* __restrict__ img2,
-    float* __restrict__ ssim_map,
-    float* __restrict__ dm_dmu1,
-    float* __restrict__ dm_dsigma1_sq,
-    float* __restrict__ dm_dsigma12
-) {
+__global__ void ssim_kernel(int H,
+                            int W,
+                            int CH,
+                            float C1,
+                            float C2,
+                            const float* __restrict__ img1,
+                            const float* __restrict__ img2,
+                            float* __restrict__ ssim_map,
+                            float* __restrict__ dm_dmu1,
+                            float* __restrict__ dm_dsigma1_sq,
+                            float* __restrict__ dm_dsigma12) {
     auto block = cg::this_thread_block();
     const int bIdx   = block.group_index().z;  // batch index
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
@@ -87,9 +85,9 @@ __global__ void fusedssimCUDA(
             float sumXY  = 0.f;
 
             // #pragma unroll for those 5 pairs
-#pragma unroll
+            #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
-                float w = cGauss[HALO - d];
+                float w = gauss_coefs[HALO - d];
                 float Xleft  = sTile[ly][lx - d][0];
                 float Yleft  = sTile[ly][lx - d][1];
                 float Xright = sTile[ly][lx + d][0];
@@ -105,7 +103,7 @@ __global__ void fusedssimCUDA(
             {
                 float centerX = sTile[ly][lx][0];
                 float centerY = sTile[ly][lx][1];
-                float wc = cGauss[HALO];
+                float wc = gauss_coefs[HALO];
                 sumX  += centerX * wc;
                 sumX2 += (centerX * centerX) * wc;
                 sumY  += centerY * wc;
@@ -127,9 +125,9 @@ __global__ void fusedssimCUDA(
                 sumY   = 0.f; sumY2  = 0.f;
                 sumXY  = 0.f;
 
-#pragma unroll
+                #pragma unroll
                 for (int d = 1; d <= HALO; ++d) {
-                    float w = cGauss[HALO - d];
+                    float w = gauss_coefs[HALO - d];
                     float Xleft  = sTile[ly2][lx - d][0];
                     float Yleft  = sTile[ly2][lx - d][1];
                     float Xright = sTile[ly2][lx + d][0];
@@ -145,7 +143,7 @@ __global__ void fusedssimCUDA(
                 {
                     float cx = sTile[ly2][lx][0];
                     float cy = sTile[ly2][lx][1];
-                    float wc = cGauss[HALO];
+                    float wc = gauss_coefs[HALO];
                     sumX  += cx * wc;
                     sumX2 += (cx * cx) * wc;
                     sumY  += cy * wc;
@@ -170,9 +168,9 @@ __global__ void fusedssimCUDA(
 
             float out0 = 0.f, out1 = 0.f, out2 = 0.f, out3 = 0.f, out4 = 0.f;
 
-#pragma unroll
+            #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
-                float w = cGauss[HALO - d];
+                float w = gauss_coefs[HALO - d];
                 float* top = xconv[ly - d][lx];
                 float* bot = xconv[ly + d][lx];
 
@@ -184,7 +182,7 @@ __global__ void fusedssimCUDA(
             }
             // center
             {
-                float wC = cGauss[HALO];
+                float wC = gauss_coefs[HALO];
                 float* ctr = xconv[ly][lx];
                 out0 += ctr[0] * wC;
                 out1 += ctr[1] * wC;
@@ -238,14 +236,11 @@ __global__ void fusedssimCUDA(
 //   Returns (ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12).
 //   If train=false, derivative Tensors are empty.
 // ------------------------------------------
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-fusedssim(
-    float C1,
-    float C2,
-    torch::Tensor &img1,
-    torch::Tensor &img2,
-    bool train
-) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda(float C1,
+                                                                                 float C2,
+                                                                                 torch::Tensor &img1,
+                                                                                 torch::Tensor &img2,
+                                                                                 bool train) {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
     int B  = img1.size(0);
     int CH = img1.size(1);
@@ -266,7 +261,7 @@ fusedssim(
     auto dm_dsigma1_sq = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
     auto dm_dsigma12   = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
 
-    fusedssimCUDA<<<grid, block>>>(
+    ssim_kernel<<<grid, block>>>(
         H, W, CH, C1, C2,
         img1.contiguous().data_ptr<float>(),
         img2.contiguous().data_ptr<float>(),

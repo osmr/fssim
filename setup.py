@@ -36,7 +36,7 @@ else:
 setup(
     ext_modules=[
         CUDAExtension(
-            name='fssim.fssim_bind',
+            name='fssim.fssim_cuda',
             sources=['fssim/bindings.cpp', 'fssim/common.cu', 'fssim/ssim.cu', 'fssim/ssim_backward.cu'],
             extra_compile_args={'cxx': ['-O3'], 'nvcc': nvcc_args}
         )
