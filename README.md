@@ -31,7 +31,7 @@ For training:
 import torch
 from fused_ssim import fused_ssim
 
-gt_image = torch.rand(2, 3, 1080, 1920)
+gt_image = torch.rand(2, 3, 1080, 1920).cuda()
 predicted_image = torch.nn.Parameter(torch.rand_like(gt_image))
 ssim_value = fused_ssim(predicted_image, gt_image)
 ```
