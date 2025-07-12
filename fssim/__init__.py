@@ -5,14 +5,14 @@
 __version__ = "0.0.1"
 
 import torch
-from .fssim_cuda import ssim, ssim_backward
+from .fssim_cuda import ssim_cuda, ssim_backward_cuda
 
 
 class SsimMap(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, C1, C2, img1, img2, padding="same", train=True):
-        ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12 = ssim(C1, C2, img1, img2, train)
+        ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12 = ssim_cuda(C1, C2, img1, img2, train)
 
         if padding == "valid":
             ssim_map = ssim_map[:, :, 5:-5, 5:-5]
@@ -32,7 +32,7 @@ class SsimMap(torch.autograd.Function):
         if padding == "valid":
             dL_dmap = torch.zeros_like(img1)
             dL_dmap[:, :, 5:-5, 5:-5] = opt_grad
-        grad = ssim_backward(C1, C2, img1, img2, dL_dmap, dm_dmu1, dm_dsigma1_sq, dm_dsigma12)
+        grad = ssim_backward_cuda(C1, C2, img1, img2, dL_dmap, dm_dmu1, dm_dsigma1_sq, dm_dsigma12)
         return None, None, grad, None, None, None
 
 

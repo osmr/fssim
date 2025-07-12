@@ -20,6 +20,6 @@ torch::Tensor ssim_backward_cuda(const float C1,
                                  const torch::Tensor& dm_dsigma12);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("ssim", &ssim_cuda, "SSIM calculation using CUDA");
-  m.def("ssim_backward", &ssim_backward_cuda, "SSIM backward calculation using CUDA");
+  m.def("ssim_cuda", &ssim_cuda, "SSIM calculation using CUDA");
+  m.def("ssim_backward_cuda", &ssim_backward_cuda, "SSIM backward calculation using CUDA");
 }

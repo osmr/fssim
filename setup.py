@@ -8,8 +8,6 @@ nvcc_args = [
     "-O3",
     "--maxrregcount=32",
     "--use_fast_math",
-    "-rdc=true",
-    "-I./fssim",
 ]
 
 if cuda_is_available():
@@ -37,7 +35,7 @@ setup(
     ext_modules=[
         CUDAExtension(
             name='fssim.fssim_cuda',
-            sources=['fssim/bindings.cpp', 'fssim/common.cu', 'fssim/ssim.cu', 'fssim/ssim_backward.cu'],
+            sources=['fssim/bindings.cpp', 'fssim/ssim.cu'],
             extra_compile_args={'cxx': ['-O3'], 'nvcc': nvcc_args}
         )
     ],
