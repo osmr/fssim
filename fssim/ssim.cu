@@ -7,9 +7,19 @@
 namespace cg = cooperative_groups;
 
 
-// ------------------------------------------
-// Constant Memory for Gaussian Coefficients
-// ------------------------------------------
+// Block and Shared Memory Dimensions
+#define BLOCK_X 16
+#define BLOCK_Y 16
+#define HALO    5
+
+#define SHARED_X (BLOCK_X + 2 * HALO)
+#define SHARED_Y (BLOCK_Y + 2 * HALO)
+
+// For partial results after horizontal pass
+#define CONV_X BLOCK_X
+#define CONV_Y SHARED_Y
+
+// Constant Memory for 1D Gaussian Coefficients
 __constant__ float gauss_coefs[11] = {
     0.001028380123898387f,
     0.0075987582094967365f,
@@ -24,29 +34,30 @@ __constant__ float gauss_coefs[11] = {
     0.001028380123898387f
 };
 
-// ------------------------------------------
-// Block and Shared Memory Dimensions
-// ------------------------------------------
-#define BLOCK_X 16
-#define BLOCK_Y 16
-#define HALO    5
-
-#define SHARED_X (BLOCK_X + 2 * HALO)
-#define SHARED_Y (BLOCK_Y + 2 * HALO)
-
-// For partial results after horizontal pass
-#define CONV_X BLOCK_X
-#define CONV_Y SHARED_Y
-
-// ------------------------------------------
-// Utility: Safe pixel fetch w/ zero padding
-// ------------------------------------------
-__device__ __forceinline__ float get_pix_value(const float* img, const int b, const int c, const int y, const int x,
-                                               const int CH, const int H, const int W) {
-    if (x < 0 || x >= W || y < 0 || y >= H) {
+/**
+ * @brief Function for safely fetching a pixel with zero-padding.
+ * @param[in] image Processed image.
+ * @param[in] b batch index.
+ * @param[in] c cannel index.
+ * @param[in] y row index.
+ * @param[in] x column index.
+ * @param[in] channels number of image channels.
+ * @param[in] height image height.
+ * @param[in] width image width.
+ * @return pixel value.
+ */
+__device__ __forceinline__ float get_pix_value(const float* const image,
+                                               const int b,
+                                               const int c,
+                                               const int y,
+                                               const int x,
+                                               const int channels,
+                                               const int height,
+                                               const int width) {
+    if (x < 0 || x >= width || y < 0 || y >= height) {
         return 0.0f;
     }
-    return img[b * CH * H * W + c * H * W + y * W + x];
+    return image[((b * channels + c) * height + y) * width + x];
 }
 
 
@@ -284,8 +295,8 @@ __global__ void ssim_kernel(const int H,
  *   Returns (ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12).
  *   If train=false, derivative Tensors are empty.
  */
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda(float C1,
-                                                                                 float C2,
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda(const float C1,
+                                                                                 const float C2,
                                                                                  const torch::Tensor& img1,
                                                                                  const torch::Tensor& img2,
                                                                                  const bool train) {
@@ -294,15 +305,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda
     TORCH_CHECK(img1.get_device() == img2.get_device(), "Input tensors must be on the same device");
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
-    const int B  = img1.size(0);
-    const int CH = img1.size(1);
-    const int H  = img1.size(2);
-    const int W  = img1.size(3);
+    const int batch  = img1.size(0);
+    const int channels = img1.size(1);
+    const int height  = img1.size(2);
+    const int width  = img1.size(3);
 
     // Launch config
-    const dim3 grid((W + BLOCK_X - 1) / BLOCK_X,
-                    (H + BLOCK_Y - 1) / BLOCK_Y,
-                    B);
+    const dim3 grid((width + BLOCK_X - 1) / BLOCK_X,
+                    (height + BLOCK_Y - 1) / BLOCK_Y,
+                    batch);
     const dim3 block(BLOCK_X, BLOCK_Y);
 
     // Output SSIM map
@@ -314,7 +325,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda
     auto dm_dsigma12   = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
 
     ssim_kernel<<<grid, block>>>(
-        H, W, CH, C1, C2,
+        height,
+        width,
+        channels,
+        C1,
+        C2,
         img1.contiguous().data_ptr<float>(),
         img2.contiguous().data_ptr<float>(),
         ssim_map.data_ptr<float>(),
@@ -496,20 +511,24 @@ torch::Tensor ssim_backward_cuda(const float C1,
                                  const torch::Tensor& dm_dsigma1_sq,
                                  const torch::Tensor& dm_dsigma12) {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
-    const int B  = img1.size(0);
-    const int CH = img1.size(1);
-    const int H  = img1.size(2);
-    const int W  = img1.size(3);
+    const int batch  = img1.size(0);
+    const int channels = img1.size(1);
+    const int height  = img1.size(2);
+    const int width  = img1.size(3);
 
     auto dL_dimg1 = torch::zeros_like(img1);
 
-    const dim3 grid((W + BLOCK_X - 1) / BLOCK_X,
-                    (H + BLOCK_Y - 1) / BLOCK_Y,
-                    B);
+    const dim3 grid((width + BLOCK_X - 1) / BLOCK_X,
+                    (height + BLOCK_Y - 1) / BLOCK_Y,
+                    batch);
     const dim3 block(BLOCK_X, BLOCK_Y);
 
     ssim_backward_kernel<<<grid, block>>>(
-        H, W, CH, C1, C2,
+        height,
+        width,
+        channels,
+        C1,
+        C2,
         img1.contiguous().data_ptr<float>(),
         img2.contiguous().data_ptr<float>(),
         dL_dmap.contiguous().data_ptr<float>(),
