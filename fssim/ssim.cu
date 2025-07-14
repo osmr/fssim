@@ -72,9 +72,9 @@ __device__ __forceinline__ float get_pix_value(const float* const image,
  *  - Writes final SSIM map to ssim_map
  *  - Optionally writes partial derivatives to dm_dmu1, dm_dsigma1_sq, dm_dsigma12
  */
-__global__ void ssim_kernel(const int H,
-                            const int W,
-                            const int CH,
+__global__ void ssim_kernel(const int channels,
+                            const int height,
+                            const int width,
                             const float C1,
                             const float C2,
                             const float* __restrict__ img1,
@@ -83,6 +83,10 @@ __global__ void ssim_kernel(const int H,
                             float* __restrict__ dm_dmu1,
                             float* __restrict__ dm_dsigma1_sq,
                             float* __restrict__ dm_dsigma12) {
+    const int CH = channels;
+    const int H = height;
+    const int W = width;
+
     auto block = cg::this_thread_block();
     const int bIdx   = block.group_index().z;  // batch index
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
@@ -325,9 +329,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda
     auto dm_dsigma12   = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
 
     ssim_kernel<<<grid, block>>>(
+        channels,
         height,
         width,
-        channels,
         C1,
         C2,
         img1.contiguous().data_ptr<float>(),
@@ -354,9 +358,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda
  * Backward pass for fused SSIM Map Calculation (CUDA Kernel): Apply chain rule to get dL/d(img1) from partial
  *    derivatives (dm_dmu1, dm_dsigma1_sq, dm_dsigma12) and dL/dmap (the gradient from above).
  */
-__global__ void ssim_backward_kernel(const int H,
-                                     const int W,
-                                     const int CH,
+__global__ void ssim_backward_kernel(const int channels,
+                                     const int height,
+                                     const int width,
                                      const float C1,
                                      const float C2,
                                      const float* __restrict__ img1,
@@ -366,6 +370,10 @@ __global__ void ssim_backward_kernel(const int H,
                                      const float* __restrict__ dm_dmu1,
                                      const float* __restrict__ dm_dsigma1_sq,
                                      const float* __restrict__ dm_dsigma12) {
+    const int CH = channels;
+    const int H = height;
+    const int W = width;
+
     auto block = cg::this_thread_block();
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
     const int pix_x  = block.group_index().x * BLOCK_X + block.thread_index().x;
@@ -524,9 +532,9 @@ torch::Tensor ssim_backward_cuda(const float C1,
     const dim3 block(BLOCK_X, BLOCK_Y);
 
     ssim_backward_kernel<<<grid, block>>>(
+        channels,
         height,
         width,
-        channels,
         C1,
         C2,
         img1.contiguous().data_ptr<float>(),
