@@ -83,16 +83,12 @@ __global__ void ssim_kernel(const int channels,
                             float* __restrict__ dm_dmu1,
                             float* __restrict__ dm_dsigma1_sq,
                             float* __restrict__ dm_dsigma12) {
-    const int CH = channels;
-    const int H = height;
-    const int W = width;
-
     auto block = cg::this_thread_block();
     const int bIdx   = block.group_index().z;  // batch index
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
     const int pix_x  = block.group_index().x * BLOCK_X + block.thread_index().x;
-    const int pix_id = pix_y * W + pix_x;
-    const int num_pix = H * W;
+    const int pix_id = pix_y * width + pix_x;
+    const int num_pix = height * width;
 
     // Shared memory for the tile (img1, img2)
     __shared__ float s_tile[SHARED_Y][SHARED_X][2];
@@ -101,7 +97,7 @@ __global__ void ssim_kernel(const int channels,
     __shared__ float x_conv[CONV_Y][CONV_X][5];
 
     // Each block processes B x C sub-batches. We loop over channels:
-    for (int c = 0; c < CH; ++c) {
+    for (int c = 0; c < channels; ++c) {
         // ------------------------------------------------------------
         // 1) Load (img1, img2) tile + halo into shared memory
         // ------------------------------------------------------------
@@ -121,8 +117,8 @@ __global__ void ssim_kernel(const int channels,
                     const int gy = tile_start_y + local_y - HALO;
                     const int gx = tile_start_x + local_x - HALO;
 
-                    const float X = get_pix_value(img1, bIdx, c, gy, gx, CH, H, W);
-                    const float Y = get_pix_value(img2, bIdx, c, gy, gx, CH, H, W);
+                    const float X = get_pix_value(img1, bIdx, c, gy, gx, channels, height, width);
+                    const float Y = get_pix_value(img2, bIdx, c, gy, gx, channels, height, width);
 
                     s_tile[local_y][local_x][0] = X;
                     s_tile[local_y][local_x][1] = Y;
@@ -252,7 +248,7 @@ __global__ void ssim_kernel(const int channels,
                 out4 += ctr[4] * wC;
             }
 
-            if (pix_x < W && pix_y < H) {
+            if (pix_x < width && pix_y < height) {
                 const float mu1 = out0;
                 const float mu2 = out2;
                 const float mu1_sq = mu1 * mu1;
@@ -269,7 +265,7 @@ __global__ void ssim_kernel(const int channels,
 
                 const float val = (C_ * D_) / (A * B);
 
-                const int global_idx = bIdx * CH * num_pix + c * num_pix + pix_id;
+                const int global_idx = bIdx * channels * num_pix + c * num_pix + pix_id;
                 ssim_map[global_idx] = val;
 
                 if (dm_dmu1) {
@@ -370,15 +366,11 @@ __global__ void ssim_backward_kernel(const int channels,
                                      const float* __restrict__ dm_dmu1,
                                      const float* __restrict__ dm_dsigma1_sq,
                                      const float* __restrict__ dm_dsigma12) {
-    const int CH = channels;
-    const int H = height;
-    const int W = width;
-
     auto block = cg::this_thread_block();
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
     const int pix_x  = block.group_index().x * BLOCK_X + block.thread_index().x;
-    const int pix_id = pix_y * W + pix_x;
-    const int num_pix = H * W;
+    const int pix_id = pix_y * width + pix_x;
+    const int num_pix = height * width;
     const int bIdx   = block.group_index().z;
 
     // Shared memory for the fused data:
@@ -386,11 +378,11 @@ __global__ void ssim_backward_kernel(const int channels,
     __shared__ float s_data[3][SHARED_Y][SHARED_X];
     __shared__ float s_scratch[CONV_Y][CONV_X][3];
 
-    for (int c = 0; c < CH; ++c) {
+    for (int c = 0; c < channels; ++c) {
         float p1 = 0.f, p2 = 0.f;
-        if (pix_x < W && pix_y < H) {
-            p1 = get_pix_value(img1, bIdx, c, pix_y, pix_x, CH, H, W);
-            p2 = get_pix_value(img2, bIdx, c, pix_y, pix_x, CH, H, W);
+        if (pix_x < width && pix_y < height) {
+            p1 = get_pix_value(img1, bIdx, c, pix_y, pix_x, channels, height, width);
+            p2 = get_pix_value(img2, bIdx, c, pix_y, pix_x, channels, height, width);
         }
 
         // (1) Load + fuse multiplication
@@ -409,10 +401,10 @@ __global__ void ssim_backward_kernel(const int channels,
                 for (int col = lane_id; col < SHARED_X; col += 32) {
                     const int gx = start_x + col - HALO;
 
-                    const float chain = get_pix_value(dL_dmap,      bIdx, c, gy, gx, CH, H, W);
-                    const float vmu   = get_pix_value(dm_dmu1,      bIdx, c, gy, gx, CH, H, W);
-                    const float vs1   = get_pix_value(dm_dsigma1_sq,bIdx, c, gy, gx, CH, H, W);
-                    const float vs12  = get_pix_value(dm_dsigma12,  bIdx, c, gy, gx, CH, H, W);
+                    const float chain = get_pix_value(dL_dmap,      bIdx, c, gy, gx, channels, height, width);
+                    const float vmu   = get_pix_value(dm_dmu1,      bIdx, c, gy, gx, channels, height, width);
+                    const float vs1   = get_pix_value(dm_dsigma1_sq,bIdx, c, gy, gx, channels, height, width);
+                    const float vs12  = get_pix_value(dm_dsigma12,  bIdx, c, gy, gx, channels, height, width);
 
                     s_data[0][row][col] = vmu  * chain;
                     s_data[1][row][col] = vs1  * chain;
@@ -467,7 +459,7 @@ __global__ void ssim_backward_kernel(const int channels,
         block.sync();
 
         // (3) Vertical pass -> finalize dL/d(img1)
-        if (pix_x < W && pix_y < H) {
+        if (pix_x < width && pix_y < height) {
             const int ly = threadIdx.y + HALO;
             const int lx = threadIdx.x;
 
@@ -495,7 +487,7 @@ __global__ void ssim_backward_kernel(const int channels,
             // final accumulation
             const float dL_dpix = sum0 + (2.f * p1) * sum1 + (p2) * sum2;
 
-            const int out_idx = bIdx * CH * num_pix + c * num_pix + pix_id;
+            const int out_idx = bIdx * channels * num_pix + c * num_pix + pix_id;
             dL_dimg1[out_idx] = dL_dpix;
         }
         block.sync();

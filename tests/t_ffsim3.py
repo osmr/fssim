@@ -34,10 +34,10 @@ def calculate_ssim(img1_path, img2_path):
 
 
 if __name__ == "__main__":
-    # image_path_1 = "../../fssim_data/test1a.png"
-    # image_path_2 = "../../fssim_data/test2a.png"
-    image_path_1 = "../../fssim_data/test1b.png"
-    image_path_2 = "../../fssim_data/test2b.png"
+    image_path_1 = "../../fssim_data/test1a.png"
+    image_path_2 = "../../fssim_data/test2a.png"
+    # image_path_1 = "../../fssim_data/test1b.png"
+    # image_path_2 = "../../fssim_data/test2b.png"
 
     try:
         ssim_score = calculate_ssim(image_path_1, image_path_2)
