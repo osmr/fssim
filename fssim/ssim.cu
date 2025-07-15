@@ -84,7 +84,7 @@ __global__ void ssim_kernel(const int channels,
                             float* __restrict__ dm_dsigma1_sq,
                             float* __restrict__ dm_dsigma12) {
     auto block = cg::this_thread_block();
-    const int bIdx   = block.group_index().z;  // batch index
+    const int b_idx   = block.group_index().z;  // batch index
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
     const int pix_x  = block.group_index().x * BLOCK_X + block.thread_index().x;
     const int pix_id = pix_y * width + pix_x;
@@ -98,9 +98,7 @@ __global__ void ssim_kernel(const int channels,
 
     // Each block processes B x C sub-batches. We loop over channels:
     for (int c = 0; c < channels; ++c) {
-        // ------------------------------------------------------------
-        // 1) Load (img1, img2) tile + halo into shared memory
-        // ------------------------------------------------------------
+        // (1) Load (img1, img2) tile + halo into shared memory
         {
             const int tile_size = SHARED_Y * SHARED_X;
             const int threads = BLOCK_X * BLOCK_Y;
@@ -110,15 +108,15 @@ __global__ void ssim_kernel(const int channels,
             const int tile_start_x = block.group_index().x * BLOCK_X;
 
             for (int s = 0; s < steps; ++s) {
-                int tid = s * threads + block.thread_rank();
+                const int tid = s * threads + block.thread_rank();
                 if (tid < tile_size) {
                     const int local_y = tid / SHARED_X;
                     const int local_x = tid % SHARED_X;
                     const int gy = tile_start_y + local_y - HALO;
                     const int gx = tile_start_x + local_x - HALO;
 
-                    const float X = get_pix_value(img1, bIdx, c, gy, gx, channels, height, width);
-                    const float Y = get_pix_value(img2, bIdx, c, gy, gx, channels, height, width);
+                    const float X = get_pix_value(img1, b_idx, c, gy, gx, channels, height, width);
+                    const float Y = get_pix_value(img2, b_idx, c, gy, gx, channels, height, width);
 
                     s_tile[local_y][local_x][0] = X;
                     s_tile[local_y][local_x][1] = Y;
@@ -127,21 +125,17 @@ __global__ void ssim_kernel(const int channels,
         }
         block.sync();
 
-        // ------------------------------------------------------------
-        // 2) Horizontal convolution (11x1) in shared memory
-        //    We'll accumulate symmetrical pairs around center.
-        // ------------------------------------------------------------
+        // (2) Horizontal convolution (11x1) in shared memory. We'll accumulate symmetrical pairs around center.
         {
             const int ly = threadIdx.y;
             const int lx = threadIdx.x + HALO;  // skip left halo
 
-            float sum_x   = 0.f;
-            float sum_x2  = 0.f;
-            float sum_y   = 0.f;
-            float sum_y2  = 0.f;
-            float sum_xY  = 0.f;
+            float sum_x   = 0.0f;
+            float sum_x2  = 0.0f;
+            float sum_y   = 0.0f;
+            float sum_y2  = 0.0f;
+            float sum_xY  = 0.0f;
 
-            // #pragma unroll for those 5 pairs
             #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
                 const float w = gauss_coefs[HALO - d];
@@ -178,9 +172,9 @@ __global__ void ssim_kernel(const int channels,
             // Possibly handle second row in same warp
             const int ly2 = ly + BLOCK_Y;
             if (ly2 < CONV_Y) {
-                sum_x   = 0.f; sum_x2  = 0.f;
-                sum_y   = 0.f; sum_y2  = 0.f;
-                sum_xY  = 0.f;
+                sum_x   = 0.0f; sum_x2  = 0.0f;
+                sum_y   = 0.0f; sum_y2  = 0.0f;
+                sum_xY  = 0.0f;
 
                 #pragma unroll
                 for (int d = 1; d <= HALO; ++d) {
@@ -216,14 +210,12 @@ __global__ void ssim_kernel(const int channels,
         }
         block.sync();
 
-        // ------------------------------------------------------------
-        // 3) Vertical convolution (1x11) + final SSIM
-        // ------------------------------------------------------------
+        // (3) Vertical convolution (1x11) + final SSIM
         {
             const int ly = threadIdx.y + HALO;
             const int lx = threadIdx.x;
 
-            float out0 = 0.f, out1 = 0.f, out2 = 0.f, out3 = 0.f, out4 = 0.f;
+            float out0 = 0.0f, out1 = 0.0f, out2 = 0.0f, out3 = 0.0f, out4 = 0.0f;
 
             #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
@@ -260,24 +252,24 @@ __global__ void ssim_kernel(const int channels,
 
                 const float A = mu1_sq + mu2_sq + C1;
                 const float B = sigma1_sq + sigma2_sq + C2;
-                const float C_ = 2.f * mu1 * mu2 + C1;
-                const float D_ = 2.f * sigma12 + C2;
+                const float C_ = 2.0f * mu1 * mu2 + C1;
+                const float D_ = 2.0f * sigma12 + C2;
 
                 const float val = (C_ * D_) / (A * B);
 
-                const int global_idx = bIdx * channels * num_pix + c * num_pix + pix_id;
+                const int global_idx = b_idx * channels * num_pix + c * num_pix + pix_id;
                 ssim_map[global_idx] = val;
 
                 if (dm_dmu1) {
                     // partial derivatives
                     const float d_m_dmu1 = (
-                        (mu2 * 2.f * D_) / (A * B)
-                        - (mu2 * 2.f * C_) / (A * B)
-                        - (mu1 * 2.f * C_ * D_) / (A * A * B)
-                        + (mu1 * 2.f * C_ * D_) / (A * B * B)
+                        (mu2 * 2.0f * D_) / (A * B)
+                        - (mu2 * 2.0f * C_) / (A * B)
+                        - (mu1 * 2.0f * C_ * D_) / (A * A * B)
+                        + (mu1 * 2.0f * C_ * D_) / (A * B * B)
                     );
                     const float d_m_dsigma1_sq = (-C_ * D_) / (A * B * B);
-                    const float d_m_dsigma12   = (2.f * C_) / (A * B);
+                    const float d_m_dsigma12   = (2.0f * C_) / (A * B);
 
                     dm_dmu1[global_idx]       = d_m_dmu1;
                     dm_dsigma1_sq[global_idx] = d_m_dsigma1_sq;
@@ -370,8 +362,8 @@ __global__ void ssim_backward_kernel(const int channels,
     const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
     const int pix_x  = block.group_index().x * BLOCK_X + block.thread_index().x;
     const int pix_id = pix_y * width + pix_x;
+    const int b_idx   = block.group_index().z;
     const int num_pix = height * width;
-    const int bIdx   = block.group_index().z;
 
     // Shared memory for the fused data:
     // [0]: dm_dmu1*dL, [1]: dm_dsigma1_sq*dL, [2]: dm_dsigma12*dL
@@ -379,10 +371,10 @@ __global__ void ssim_backward_kernel(const int channels,
     __shared__ float s_scratch[CONV_Y][CONV_X][3];
 
     for (int c = 0; c < channels; ++c) {
-        float p1 = 0.f, p2 = 0.f;
+        float p1 = 0.0f, p2 = 0.0f;
         if (pix_x < width && pix_y < height) {
-            p1 = get_pix_value(img1, bIdx, c, pix_y, pix_x, channels, height, width);
-            p2 = get_pix_value(img2, bIdx, c, pix_y, pix_x, channels, height, width);
+            p1 = get_pix_value(img1, b_idx, c, pix_y, pix_x, channels, height, width);
+            p2 = get_pix_value(img2, b_idx, c, pix_y, pix_x, channels, height, width);
         }
 
         // (1) Load + fuse multiplication
@@ -401,10 +393,10 @@ __global__ void ssim_backward_kernel(const int channels,
                 for (int col = lane_id; col < SHARED_X; col += 32) {
                     const int gx = start_x + col - HALO;
 
-                    const float chain = get_pix_value(dL_dmap,      bIdx, c, gy, gx, channels, height, width);
-                    const float vmu   = get_pix_value(dm_dmu1,      bIdx, c, gy, gx, channels, height, width);
-                    const float vs1   = get_pix_value(dm_dsigma1_sq,bIdx, c, gy, gx, channels, height, width);
-                    const float vs12  = get_pix_value(dm_dsigma12,  bIdx, c, gy, gx, channels, height, width);
+                    const float chain = get_pix_value(dL_dmap,       b_idx, c, gy, gx, channels, height, width);
+                    const float vmu   = get_pix_value(dm_dmu1,       b_idx, c, gy, gx, channels, height, width);
+                    const float vs1   = get_pix_value(dm_dsigma1_sq, b_idx, c, gy, gx, channels, height, width);
+                    const float vs12  = get_pix_value(dm_dsigma12,   b_idx, c, gy, gx, channels, height, width);
 
                     s_data[0][row][col] = vmu  * chain;
                     s_data[1][row][col] = vs1  * chain;
@@ -422,7 +414,7 @@ __global__ void ssim_backward_kernel(const int channels,
             for (int pass = 0; pass < 2; ++pass) {
                 const int yy = ly + pass * BLOCK_Y;
                 if (yy < CONV_Y) {
-                    float accum0 = 0.f, accum1 = 0.f, accum2 = 0.f;
+                    float accum0 = 0.0f, accum1 = 0.0f, accum2 = 0.0f;
 
                     #pragma unroll
                     for (int d = 1; d <= HALO; ++d) {
@@ -459,11 +451,11 @@ __global__ void ssim_backward_kernel(const int channels,
         block.sync();
 
         // (3) Vertical pass -> finalize dL/d(img1)
-        if (pix_x < width && pix_y < height) {
+        if ((pix_x < width) && (pix_y < height)) {
             const int ly = threadIdx.y + HALO;
             const int lx = threadIdx.x;
 
-            float sum0 = 0.f, sum1 = 0.f, sum2 = 0.f;
+            float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f;
 
             #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
@@ -485,9 +477,9 @@ __global__ void ssim_backward_kernel(const int channels,
             }
 
             // final accumulation
-            const float dL_dpix = sum0 + (2.f * p1) * sum1 + (p2) * sum2;
+            const float dL_dpix = sum0 + (2.0f * p1) * sum1 + (p2) * sum2;
 
-            const int out_idx = bIdx * channels * num_pix + c * num_pix + pix_id;
+            const int out_idx = b_idx * channels * num_pix + c * num_pix + pix_id;
             dL_dimg1[out_idx] = dL_dpix;
         }
         block.sync();
