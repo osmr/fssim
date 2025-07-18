@@ -61,6 +61,22 @@ __device__ __forceinline__ float get_pix_value(const float* const image,
 }
 
 
+/**
+ * @brief Calculate grid dimension.
+ * @param[in] batch size of image batch.
+ * @param[in] height image height.
+ * @param[in] width image width.
+ * @return pixel value.
+ */
+inline dim3 calc_grid_dim(const int batch,
+                          const int height,
+                          const int width) {
+    return dim3(
+        (width + BLOCK_X - 1) / BLOCK_X,
+        (height + BLOCK_Y - 1) / BLOCK_Y,
+        batch);
+}
+
 //-------------------------------------------------------------------------------------------
 
 
@@ -71,7 +87,19 @@ __device__ __forceinline__ float get_pix_value(const float* const image,
  *  - Two-pass convolution to get mu1, mu2, sigma1_sq, sigma2_sq, sigma12, etc.
  *  - Writes final SSIM map to ssim_map
  *  - Optionally writes partial derivatives to dm_dmu1, dm_dsigma1_sq, dm_dsigma12
- */
+ *
+ * @param[in] channels number of image channels.
+ * @param[in] height image height.
+ * @param[in] width image width.
+ * @param[in] C1 C1-const.
+ * @param[in] C2 C2-const.
+ * @param[in] img1 The first image.
+ * @param[in] img2 The second image.
+ * @param[out] ssim_map SSIM map/image.
+ * @param[out] dm_dmu1 dm_dmu1 partial derivative image.
+ * @param[out] dm_dsigma1_sq dm_dsigma1_sq partial derivative image.
+ * @param[out] dm_dsigma12 dm_dsigma12 partial derivative image.
+*/
 __global__ void ssim_kernel(const int channels,
                             const int height,
                             const int width,
@@ -85,35 +113,36 @@ __global__ void ssim_kernel(const int channels,
                             float* __restrict__ dm_dsigma12) {
     const cg::thread_block block = cg::this_thread_block();
     const dim3 g_idx = block.group_index();
-    const dim3 t_idx = block.thread_index();
+    const dim3 thread_idx = block.thread_index();
     const int b_idx = g_idx.z;  // batch index
-    const int pix_y = g_idx.y * BLOCK_Y + t_idx.y;
-    const int pix_x = g_idx.x * BLOCK_X + t_idx.x;
-    const int pix_id = pix_y * width + pix_x;
+    const int pix_y = g_idx.y * BLOCK_Y + thread_idx.y;
+    const int pix_x = g_idx.x * BLOCK_X + thread_idx.x;
+    const int pix_idx = pix_y * width + pix_x;
+
     const int num_pix = height * width;
+
+    const int tile_size = SHARED_Y * SHARED_X;
+    const int threads = BLOCK_X * BLOCK_Y;
+    const int steps = (tile_size + threads - 1) / threads;
 
     // Shared memory for the tile (img1, img2)
     __shared__ float s_tile[SHARED_Y][SHARED_X][2];
     // After horizontal pass, store partial sums here
-    // x_conv[y][x] -> (sum_x, sum_x^2, sum_y, sum_y^2, sum_xY)
+    // x_conv[y][x] -> (sum_x, sum_x^2, sum_y, sum_y^2, sum_xy)
     __shared__ float x_conv[CONV_Y][CONV_X][5];
 
     // Each block processes B x C sub-batches. We loop over channels:
     for (int c = 0; c < channels; ++c) {
         // (1) Load (img1, img2) tile + halo into shared memory
         {
-            const int tile_size = SHARED_Y * SHARED_X;
-            const int threads = BLOCK_X * BLOCK_Y;
-            const int steps = (tile_size + threads - 1) / threads;
-
             const int tile_start_y = g_idx.y * BLOCK_Y;
             const int tile_start_x = g_idx.x * BLOCK_X;
 
             for (int s = 0; s < steps; ++s) {
-                const int tid = s * threads + block.thread_rank();
-                if (tid < tile_size) {
-                    const int local_y = tid / SHARED_X;
-                    const int local_x = tid % SHARED_X;
+                const int tile_id = s * threads + block.thread_rank();
+                if (tile_id < tile_size) {
+                    const int local_y = tile_id / SHARED_X;
+                    const int local_x = tile_id % SHARED_X;
                     const int gy = tile_start_y + local_y - HALO;
                     const int gx = tile_start_x + local_x - HALO;
 
@@ -129,14 +158,10 @@ __global__ void ssim_kernel(const int channels,
 
         // (2) Horizontal convolution (11x1) in shared memory. We'll accumulate symmetrical pairs around center.
         {
-            const int ly = threadIdx.y;
-            const int lx = threadIdx.x + HALO;  // skip left halo
+            const int ly = thread_idx.y;
+            const int lx = thread_idx.x + HALO;  // skip left halo
 
-            float sum_x   = 0.0f;
-            float sum_x2  = 0.0f;
-            float sum_y   = 0.0f;
-            float sum_y2  = 0.0f;
-            float sum_xY  = 0.0f;
+            float sum_x = 0.0f, sum_x2 = 0.0f, sum_y = 0.0f, sum_y2 = 0.0f, sum_xy = 0.0f;
 
             #pragma unroll
             for (int d = 1; d <= HALO; ++d) {
@@ -150,7 +175,7 @@ __global__ void ssim_kernel(const int channels,
                 sum_x2 += ((x_left * x_left) + (x_right * x_right)) * w;
                 sum_y  += (y_left + y_right) * w;
                 sum_y2 += ((y_left * y_left) + (y_right * y_right)) * w;
-                sum_xY += ((x_left * y_left) + (x_right * y_right)) * w;
+                sum_xy += ((x_left * y_left) + (x_right * y_right)) * w;
             }
             // center
             {
@@ -161,22 +186,20 @@ __global__ void ssim_kernel(const int channels,
                 sum_x2 += (center_x * center_x) * wc;
                 sum_y  += center_y * wc;
                 sum_y2 += (center_y * center_y) * wc;
-                sum_xY += (center_x * center_y) * wc;
+                sum_xy += (center_x * center_y) * wc;
             }
 
             // Write out partial sums
-            x_conv[ly][threadIdx.x][0] = sum_x;
-            x_conv[ly][threadIdx.x][1] = sum_x2;
-            x_conv[ly][threadIdx.x][2] = sum_y;
-            x_conv[ly][threadIdx.x][3] = sum_y2;
-            x_conv[ly][threadIdx.x][4] = sum_xY;
+            x_conv[ly][thread_idx.x][0] = sum_x;
+            x_conv[ly][thread_idx.x][1] = sum_x2;
+            x_conv[ly][thread_idx.x][2] = sum_y;
+            x_conv[ly][thread_idx.x][3] = sum_y2;
+            x_conv[ly][thread_idx.x][4] = sum_xy;
 
             // Possibly handle second row in same warp
             const int ly2 = ly + BLOCK_Y;
             if (ly2 < CONV_Y) {
-                sum_x   = 0.0f; sum_x2  = 0.0f;
-                sum_y   = 0.0f; sum_y2  = 0.0f;
-                sum_xY  = 0.0f;
+                sum_x = sum_x2 = sum_y = sum_y2 = sum_xy = 0.0f;
 
                 #pragma unroll
                 for (int d = 1; d <= HALO; ++d) {
@@ -190,7 +213,7 @@ __global__ void ssim_kernel(const int channels,
                     sum_x2 += ((x_left * x_left) + (x_right * x_right)) * w;
                     sum_y  += (y_left + y_right) * w;
                     sum_y2 += ((y_left * y_left) + (y_right * y_right)) * w;
-                    sum_xY += ((x_left * y_left) + (x_right * y_right)) * w;
+                    sum_xy += ((x_left * y_left) + (x_right * y_right)) * w;
                 }
                 // center
                 {
@@ -201,21 +224,21 @@ __global__ void ssim_kernel(const int channels,
                     sum_x2 += (cx * cx) * wc;
                     sum_y  += cy * wc;
                     sum_y2 += (cy * cy) * wc;
-                    sum_xY += (cx * cy) * wc;
+                    sum_xy += (cx * cy) * wc;
                 }
-                x_conv[ly2][threadIdx.x][0] = sum_x;
-                x_conv[ly2][threadIdx.x][1] = sum_x2;
-                x_conv[ly2][threadIdx.x][2] = sum_y;
-                x_conv[ly2][threadIdx.x][3] = sum_y2;
-                x_conv[ly2][threadIdx.x][4] = sum_xY;
+                x_conv[ly2][thread_idx.x][0] = sum_x;
+                x_conv[ly2][thread_idx.x][1] = sum_x2;
+                x_conv[ly2][thread_idx.x][2] = sum_y;
+                x_conv[ly2][thread_idx.x][3] = sum_y2;
+                x_conv[ly2][thread_idx.x][4] = sum_xy;
             }
         }
         block.sync();
 
         // (3) Vertical convolution (1x11) + final SSIM
         {
-            const int ly = threadIdx.y + HALO;
-            const int lx = threadIdx.x;
+            const int ly = thread_idx.y + HALO;
+            const int lx = thread_idx.x;
 
             float out0 = 0.0f, out1 = 0.0f, out2 = 0.0f, out3 = 0.0f, out4 = 0.0f;
 
@@ -259,36 +282,22 @@ __global__ void ssim_kernel(const int channels,
 
                 const float val = (C_ * D_) / (A * B);
 
-                const int global_idx = b_idx * channels * num_pix + c * num_pix + pix_id;
+                const int global_idx = b_idx * channels * num_pix + c * num_pix + pix_idx;
                 ssim_map[global_idx] = val;
 
                 if (dm_dmu1) {
                     // partial derivatives
-                    const float d_m_dmu1 = (
-                        (mu2 * 2.0f * D_) / (A * B)
-                        - (mu2 * 2.0f * C_) / (A * B)
-                        - (mu1 * 2.0f * C_ * D_) / (A * A * B)
-                        + (mu1 * 2.0f * C_ * D_) / (A * B * B)
-                    );
+                    const float d_m_dmu1 = 2.0f * (mu2 * (D_ - C_) + mu1 * (A - B) * val) / (A * B);
                     const float d_m_dsigma1_sq = (-C_ * D_) / (A * B * B);
                     const float d_m_dsigma12   = (2.0f * C_) / (A * B);
 
-                    dm_dmu1[global_idx]       = d_m_dmu1;
+                    dm_dmu1[global_idx] = d_m_dmu1;
                     dm_dsigma1_sq[global_idx] = d_m_dsigma1_sq;
-                    dm_dsigma12[global_idx]   = d_m_dsigma12;
+                    dm_dsigma12[global_idx] = d_m_dsigma12;
                 }
             }
         }
     }
-}
-
-inline dim3 calc_grid_dim(const int batch,
-                          const int height,
-                          const int width) {
-    return dim3(
-        (width + BLOCK_X - 1) / BLOCK_X,
-        (height + BLOCK_Y - 1) / BLOCK_Y,
-        batch);
 }
 
 /**
@@ -297,6 +306,13 @@ inline dim3 calc_grid_dim(const int batch,
  * PyTorch Interface for SSIM Map calculation (Forward pass)
  *   Returns (ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12).
  *   If train=false, derivative Tensors are empty.
+ *
+ * @param[in] C1 C1-const.
+ * @param[in] C2 C2-const.
+ * @param[in] img1 The first image.
+ * @param[in] img2 The second image.
+ * @param[in] train Whether to calculate partial derivatives.
+ * @return Tuple of (ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12).
  */
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda(const float C1,
                                                                                  const float C2,
@@ -364,6 +380,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda
  *
  * Backward pass for fused SSIM Map Calculation (CUDA Kernel): Apply chain rule to get dL/d(img1) from partial
  *    derivatives (dm_dmu1, dm_dsigma1_sq, dm_dsigma12) and dL/dmap (the gradient from above).
+ *
+ * @param[in] channels number of image channels.
+ * @param[in] height image height.
+ * @param[in] width image width.
+ * @param[in] C1 C1-const.
+ * @param[in] C2 C2-const.
+ * @param[in] img1 The first image.
+ * @param[in] img2 The second image.
+ * @param[in] dL_dmap dL_dmap partial derivative image.
+ * @param[in] dm_dmu1 dm_dmu1 partial derivative image.
+ * @param[in] dm_dsigma1_sq dm_dsigma1_sq partial derivative image.
+ * @param[in] dm_dsigma12 dm_dsigma12 partial derivative image.
+ * @param[out] dL_dimg1 dL_dimg1 partial derivative image.
  */
 __global__ void ssim_backward_kernel(const int channels,
                                      const int height,
@@ -379,11 +408,11 @@ __global__ void ssim_backward_kernel(const int channels,
                                      float* __restrict__ dL_dimg1) {
     const cg::thread_block block = cg::this_thread_block();
     const dim3 g_idx = block.group_index();
-    const dim3 t_idx = block.thread_index();
+    const dim3 thread_idx = block.thread_index();
     const int b_idx = g_idx.z;
-    const int pix_y = g_idx.y * BLOCK_Y + t_idx.y;
-    const int pix_x = g_idx.x * BLOCK_X + t_idx.x;
-    const int pix_id = pix_y * width + pix_x;
+    const int pix_y = g_idx.y * BLOCK_Y + thread_idx.y;
+    const int pix_x = g_idx.x * BLOCK_X + thread_idx.x;
+    const int pix_idx = pix_y * width + pix_x;
     const int num_pix = height * width;
 
     // Shared memory for the fused data:
@@ -403,11 +432,11 @@ __global__ void ssim_backward_kernel(const int channels,
             const int start_y = g_idx.y * BLOCK_Y;
             const int start_x = g_idx.x * BLOCK_X;
 
-            const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+            const int tid = thread_idx.y * blockDim.x + thread_idx.x;
             const int warp_id = tid / 32;
             const int lane_id = tid % 32;
-            const int totalThreads = BLOCK_X * BLOCK_Y;
-            const int num_warps = (totalThreads + 31) / 32;
+            const int total_threads = BLOCK_X * BLOCK_Y;
+            const int num_warps = (total_threads + 31) / 32;
 
             for (int row = warp_id; row < SHARED_Y; row += num_warps) {
                 const int gy = start_y + row - HALO;
@@ -429,8 +458,8 @@ __global__ void ssim_backward_kernel(const int channels,
 
         // (2) Horizontal pass
         {
-            const int ly = threadIdx.y;
-            const int lx = threadIdx.x + HALO;
+            const int ly = thread_idx.y;
+            const int lx = thread_idx.x + HALO;
 
             for (int pass = 0; pass < 2; ++pass) {
                 const int yy = ly + pass * BLOCK_Y;
@@ -463,9 +492,9 @@ __global__ void ssim_backward_kernel(const int channels,
                         accum2 += c2 * wc;
                     }
 
-                    s_scratch[yy][threadIdx.x][0] = accum0;
-                    s_scratch[yy][threadIdx.x][1] = accum1;
-                    s_scratch[yy][threadIdx.x][2] = accum2;
+                    s_scratch[yy][thread_idx.x][0] = accum0;
+                    s_scratch[yy][thread_idx.x][1] = accum1;
+                    s_scratch[yy][thread_idx.x][2] = accum2;
                 }
             }
         }
@@ -473,8 +502,8 @@ __global__ void ssim_backward_kernel(const int channels,
 
         // (3) Vertical pass -> finalize dL/d(img1)
         if ((pix_x < width) && (pix_y < height)) {
-            const int ly = threadIdx.y + HALO;
-            const int lx = threadIdx.x;
+            const int ly = thread_idx.y + HALO;
+            const int lx = thread_idx.x;
 
             float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f;
 
@@ -500,7 +529,7 @@ __global__ void ssim_backward_kernel(const int channels,
             // final accumulation
             const float dL_dpix = sum0 + (2.0f * p1) * sum1 + (p2) * sum2;
 
-            const int out_idx = b_idx * channels * num_pix + c * num_pix + pix_id;
+            const int out_idx = b_idx * channels * num_pix + c * num_pix + pix_idx;
             dL_dimg1[out_idx] = dL_dpix;
         }
         block.sync();
@@ -514,6 +543,16 @@ __global__ void ssim_backward_kernel(const int channels,
  *   Takes the gradient wrt the SSIM map and
  *   the partial derivatives from forward;
  *   returns dL/d(img1).
+ *
+ * @param[in] C1 C1-const.
+ * @param[in] C2 C2-const.
+ * @param[in] img1 The first image.
+ * @param[in] img2 The second image.
+ * @param[in] dL_dmap dL_dmap partial derivative image.
+ * @param[in] dm_dmu1 dm_dmu1 partial derivative image.
+ * @param[in] dm_dsigma1_sq dm_dsigma1_sq partial derivative image.
+ * @param[in] dm_dsigma12 dm_dsigma12 partial derivative image.
+ * @return dL_dimg1 partial derivative image.
  */
 torch::Tensor ssim_backward_cuda(const float C1,
                                  const float C2,
