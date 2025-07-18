@@ -83,10 +83,12 @@ __global__ void ssim_kernel(const int channels,
                             float* __restrict__ dm_dmu1,
                             float* __restrict__ dm_dsigma1_sq,
                             float* __restrict__ dm_dsigma12) {
-    auto block = cg::this_thread_block();
-    const int b_idx   = block.group_index().z;  // batch index
-    const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
-    const int pix_x  = block.group_index().x * BLOCK_X + block.thread_index().x;
+    const cg::thread_block block = cg::this_thread_block();
+    const dim3 g_idx = block.group_index();
+    const dim3 t_idx = block.thread_index();
+    const int b_idx = g_idx.z;  // batch index
+    const int pix_y = g_idx.y * BLOCK_Y + t_idx.y;
+    const int pix_x = g_idx.x * BLOCK_X + t_idx.x;
     const int pix_id = pix_y * width + pix_x;
     const int num_pix = height * width;
 
@@ -104,8 +106,8 @@ __global__ void ssim_kernel(const int channels,
             const int threads = BLOCK_X * BLOCK_Y;
             const int steps = (tile_size + threads - 1) / threads;
 
-            const int tile_start_y = block.group_index().y * BLOCK_Y;
-            const int tile_start_x = block.group_index().x * BLOCK_X;
+            const int tile_start_y = g_idx.y * BLOCK_Y;
+            const int tile_start_x = g_idx.x * BLOCK_X;
 
             for (int s = 0; s < steps; ++s) {
                 const int tid = s * threads + block.thread_rank();
@@ -280,6 +282,15 @@ __global__ void ssim_kernel(const int channels,
     }
 }
 
+inline dim3 calc_grid_dim(const int batch,
+                          const int height,
+                          const int width) {
+    return dim3(
+        (width + BLOCK_X - 1) / BLOCK_X,
+        (height + BLOCK_Y - 1) / BLOCK_Y,
+        batch);
+}
+
 /**
  * @brief PyTorch Interface (Forward).
  *
@@ -295,6 +306,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda
     TORCH_CHECK(img1.device().is_cuda(), "Tensor img1 must be on CUDA device");
     TORCH_CHECK(img2.device().is_cuda(), "Tensor img2 must be on CUDA device");
     TORCH_CHECK(img1.get_device() == img2.get_device(), "Input tensors must be on the same device");
+    TORCH_CHECK(img1.dtype() == torch::kFloat32, "Only float32 is supported");
+    TORCH_CHECK(img2.dtype() == torch::kFloat32, "Only float32 is supported");
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(img1));
     const int batch  = img1.size(0);
@@ -302,32 +315,38 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ssim_cuda
     const int height  = img1.size(2);
     const int width  = img1.size(3);
 
-    // Launch config
-    const dim3 grid((width + BLOCK_X - 1) / BLOCK_X,
-                    (height + BLOCK_Y - 1) / BLOCK_Y,
-                    batch);
-    const dim3 block(BLOCK_X, BLOCK_Y);
+    const dim3 block_dim(BLOCK_X, BLOCK_Y);
+    const dim3 grid_dim = calc_grid_dim(batch, height, width);
 
-    // Output SSIM map
-    auto ssim_map = torch::zeros_like(img1, img1.options()).contiguous();
+    const torch::Tensor img1_contiguous = img1.contiguous();
+    const torch::Tensor img2_contiguous = img2.contiguous();
 
-    // Optionally allocate derivative Tensors
-    auto dm_dmu1       = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
-    auto dm_dsigma1_sq = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
-    auto dm_dsigma12   = train ? torch::zeros_like(img1) : torch::empty({0}, img1.options());
+    torch::Tensor ssim_map = torch::zeros_like(img1_contiguous);
 
-    ssim_kernel<<<grid, block>>>(
+    auto create_optional_derivative_tensor = [&]() -> torch::Tensor {
+        return train ? torch::zeros_like(img1_contiguous) : torch::empty({0}, img1_contiguous.options());
+    };
+
+    torch::Tensor dm_dmu1 = create_optional_derivative_tensor();
+    torch::Tensor dm_dsigma1_sq = create_optional_derivative_tensor();
+    torch::Tensor dm_dsigma12 = create_optional_derivative_tensor();
+
+    auto get_conditional_ptr = [&](const torch::Tensor& t) -> float* {
+        return train ? t.data_ptr<float>() : nullptr;
+    };
+
+    ssim_kernel<<<grid_dim, block_dim>>>(
         channels,
         height,
         width,
         C1,
         C2,
-        img1.contiguous().data_ptr<float>(),
-        img2.contiguous().data_ptr<float>(),
+        img1_contiguous.data_ptr<float>(),
+        img2_contiguous.data_ptr<float>(),
         ssim_map.data_ptr<float>(),
-        train ? dm_dmu1.data_ptr<float>()       : nullptr,
-        train ? dm_dsigma1_sq.data_ptr<float>() : nullptr,
-        train ? dm_dsigma12.data_ptr<float>()   : nullptr
+        get_conditional_ptr(dm_dmu1),
+        get_conditional_ptr(dm_dsigma1_sq),
+        get_conditional_ptr(dm_dsigma12)
     );
 
     const cudaError_t err = cudaDeviceSynchronize();
@@ -354,15 +373,17 @@ __global__ void ssim_backward_kernel(const int channels,
                                      const float* __restrict__ img1,
                                      const float* __restrict__ img2,
                                      const float* __restrict__ dL_dmap,
-                                     float* __restrict__ dL_dimg1,
                                      const float* __restrict__ dm_dmu1,
                                      const float* __restrict__ dm_dsigma1_sq,
-                                     const float* __restrict__ dm_dsigma12) {
-    auto block = cg::this_thread_block();
-    const int pix_y  = block.group_index().y * BLOCK_Y + block.thread_index().y;
-    const int pix_x  = block.group_index().x * BLOCK_X + block.thread_index().x;
+                                     const float* __restrict__ dm_dsigma12,
+                                     float* __restrict__ dL_dimg1) {
+    const cg::thread_block block = cg::this_thread_block();
+    const dim3 g_idx = block.group_index();
+    const dim3 t_idx = block.thread_index();
+    const int b_idx = g_idx.z;
+    const int pix_y = g_idx.y * BLOCK_Y + t_idx.y;
+    const int pix_x = g_idx.x * BLOCK_X + t_idx.x;
     const int pix_id = pix_y * width + pix_x;
-    const int b_idx   = block.group_index().z;
     const int num_pix = height * width;
 
     // Shared memory for the fused data:
@@ -379,8 +400,8 @@ __global__ void ssim_backward_kernel(const int channels,
 
         // (1) Load + fuse multiplication
         {
-            const int start_y = block.group_index().y * BLOCK_Y;
-            const int start_x = block.group_index().x * BLOCK_X;
+            const int start_y = g_idx.y * BLOCK_Y;
+            const int start_x = g_idx.x * BLOCK_X;
 
             const int tid = threadIdx.y * blockDim.x + threadIdx.x;
             const int warp_id = tid / 32;
@@ -508,26 +529,27 @@ torch::Tensor ssim_backward_cuda(const float C1,
     const int height  = img1.size(2);
     const int width  = img1.size(3);
 
-    auto dL_dimg1 = torch::zeros_like(img1);
+    const dim3 block_dim(BLOCK_X, BLOCK_Y);
+    const dim3 grid_dim = calc_grid_dim(batch, height, width);
 
-    const dim3 grid((width + BLOCK_X - 1) / BLOCK_X,
-                    (height + BLOCK_Y - 1) / BLOCK_Y,
-                    batch);
-    const dim3 block(BLOCK_X, BLOCK_Y);
+    const torch::Tensor img1_contiguous = img1.contiguous();
+    const torch::Tensor img2_contiguous = img2.contiguous();
 
-    ssim_backward_kernel<<<grid, block>>>(
+    torch::Tensor dL_dimg1 = torch::zeros_like(img1_contiguous);
+
+    ssim_backward_kernel<<<grid_dim, block_dim>>>(
         channels,
         height,
         width,
         C1,
         C2,
-        img1.contiguous().data_ptr<float>(),
-        img2.contiguous().data_ptr<float>(),
+        img1_contiguous.data_ptr<float>(),
+        img2_contiguous.data_ptr<float>(),
         dL_dmap.contiguous().data_ptr<float>(),
-        dL_dimg1.data_ptr<float>(),
         dm_dmu1.contiguous().data_ptr<float>(),
         dm_dsigma1_sq.contiguous().data_ptr<float>(),
-        dm_dsigma12.contiguous().data_ptr<float>()
+        dm_dsigma12.contiguous().data_ptr<float>(),
+        dL_dimg1.data_ptr<float>()
     );
 
     const cudaError_t err = cudaDeviceSynchronize();
